@@ -33,19 +33,22 @@ winget install jqlang.jq
 
 ```bash
 # Single page
-./figma-to-bootstrap.sh \
+  source config.sh && ./figma-to-bootstrap.sh \
   -k YOUR_FIGMA_API_KEY \
   -f YOUR_FILE_ID \
-  -p "Components"
+  -p "Page, Components" \
+  -r "Homepage" \
+  --output-frame-html \
+  --frame-name "Homepage"
 
 # Multiple pages (comma-separated)
-./figma-to-bootstrap.sh \
+source config.sh && ./figma-to-bootstrap.sh \
   -k YOUR_FIGMA_API_KEY \
   -f YOUR_FILE_ID \
   -p "Components,Forms,Layouts"
 
 # Multiple pages (multiple flags)
-./figma-to-bootstrap.sh \
+source config.sh && ./figma-to-bootstrap.sh \
   -k YOUR_FIGMA_API_KEY \
   -f YOUR_FILE_ID \
   -p "Components" \
@@ -64,6 +67,21 @@ winget install jqlang.jq
   --output-dir ./my-components \
   --bootstrap 5.3.2 \
   --template-engine smarty
+
+# Extract specific frames from a page (comma-separated)
+./figma-to-bootstrap.sh \
+  -k YOUR_FIGMA_API_KEY \
+  -f YOUR_FILE_ID \
+  -p "Homepage" \
+  -r "Header,Hero Section,Footer"
+
+# Extract specific frames (multiple flags)
+./figma-to-bootstrap.sh \
+  -k YOUR_FIGMA_API_KEY \
+  -f YOUR_FILE_ID \
+  -p "Homepage" \
+  -r "Header" \
+  -r "Footer"
 
 # Extract only shared components (used across multiple pages)
 ./figma-to-bootstrap.sh \
@@ -90,6 +108,7 @@ export FIGMA_API_KEY="your-api-key-here"
 | `-k` | `--api-key` | Figma API key | Yes* | - |
 | `-f` | `--file-id` | Figma file ID | Yes | - |
 | `-p` | `--page-names` | Page names (comma-separated or multiple flags) | Yes | - |
+| `-r` | `--frame-names` | Frame names to extract (comma-separated or multiple flags) | No | - |
 | `-o` | `--output-dir` | Output directory | No | `./figma-components` |
 | `-b` | `--bootstrap` | Bootstrap version | No | `5.3.2` |
 | `-t` | `--template-engine` | Template engine (smarty/twig/generic) | No | `smarty` |

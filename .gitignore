@@ -1,1 +1,3 @@
-config.example.sh
+config.sh
+config.sh.dst
+figma-components/

@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # Figma to Bootstrap Components Converter
-# This script extracts components from a Figma page and creates individual HTML and TPL files
+# This script extracts components and frames from a Figma page and creates individual HTML and TPL files
 
 set -e
 
@@ -30,7 +30,7 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Convert Figma components to HTML/TPL files with Bootstrap
+Convert Figma components and frames to HTML/TPL files with Bootstrap
 
 Required:
     -k, --api-key KEY       Figma API key (or set FIGMA_API_KEY env var)
@@ -39,24 +39,32 @@ Required:
                            Or use multiple -p flags: -p "Components" -p "Forms"
 
 Optional:
+    -r, --frame-names NAMES Comma-separated frame names to extract (e.g., "Header,Footer")
+                           Or use multiple -r flags: -r "Header" -r "Footer"
+                           Extracts both the frame itself and components within it
     -o, --output-dir DIR    Output directory (default: ./figma-components)
     -b, --bootstrap VER     Bootstrap version (default: 5.3.2)
     -t, --template-engine   Template engine for .tpl files (default: smarty)
     -s, --shared-only      Only extract components that appear on multiple pages
+    --output-frame-html     Output a single HTML file with a complete frame and all components
+    --frame-name FRAME      Specific frame name to output as complete HTML (requires --output-frame-html)
     -h, --help             Show this help message
 
 Examples:
-    # Single page
+    # Single page with components
     $0 -k YOUR_API_KEY -f FILE_ID -p "Components" -o ./output
     
-    # Multiple pages (comma-separated)
-    $0 -k YOUR_API_KEY -f FILE_ID -p "Components,Forms,Layouts" -o ./output
+    # Multiple pages with specific frames
+    $0 -k YOUR_API_KEY -f FILE_ID -p "Components,Forms" -r "Header,Footer"
     
-    # Multiple pages (multiple flags)
-    $0 -k YOUR_API_KEY -f FILE_ID -p "Components" -p "Forms" -p "Layouts"
+    # Extract frames and all components from a page
+    $0 -k YOUR_API_KEY -f FILE_ID -p "Homepage" -r "Hero Section"
     
     # Extract only shared components
     $0 -k YOUR_API_KEY -f FILE_ID -p "Page1,Page2" -s
+    
+    # Output complete HTML for a specific frame with all components
+    $0 -k YOUR_API_KEY -f FILE_ID -p "Homepage" -r "Hero Section" --output-frame-html --frame-name "Hero Section"
 
 Environment Variables:
     FIGMA_API_KEY          Figma API key (alternative to -k flag)
@@ -70,10 +78,13 @@ parse_args() {
     FIGMA_API_KEY="${FIGMA_API_KEY:-}"
     FILE_ID=""
     PAGE_NAMES=()
+    FRAME_NAMES=()
     OUTPUT_DIR="./figma-components"
     BOOTSTRAP_VERSION="5.3.2"
     TEMPLATE_ENGINE="smarty"
     SHARED_ONLY=false
+    OUTPUT_FRAME_HTML=false
+    FRAME_FOR_HTML=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -97,6 +108,22 @@ parse_args() {
                 done
                 shift 2
                 ;;
+            -r|--frame-names)
+                # Support both comma-separated and multiple flags
+                IFS=',' read -ra FRAMES <<< "$2"
+                for frame in "${FRAMES[@]}"; do
+                    # Trim whitespace
+                    frame=$(echo "$frame" | xargs)
+                    if [ ! -z "$frame" ]; then
+                        FRAME_NAMES+=("$frame")
+                    fi
+                done
+                shift 2
+                ;;
+            --frame-name)
+                FRAME_FOR_HTML="$2"
+                shift 2
+                ;;
             -o|--output-dir)
                 OUTPUT_DIR="$2"
                 shift 2
@@ -111,6 +138,10 @@ parse_args() {
                 ;;
             -s|--shared-only)
                 SHARED_ONLY=true
+                shift
+                ;;
+            --output-frame-html)
+                OUTPUT_FRAME_HTML=true
                 shift
                 ;;
             -h|--help)
@@ -154,6 +185,175 @@ fetch_figma_data() {
     
     echo "$response" > "$OUTPUT_DIR/figma-data.json"
     echo -e "${GREEN}✓ Figma data fetched successfully${NC}"
+}
+
+# Extract frames from the specified pages
+extract_frames() {
+    if [ ${#FRAME_NAMES[@]} -eq 0 ]; then
+        return
+    fi
+    
+    echo -e "${YELLOW}Extracting frames from ${#PAGE_NAMES[@]} page(s)...${NC}"
+    
+    local figma_data="$OUTPUT_DIR/figma-data.json"
+    local all_frames_file="$OUTPUT_DIR/all-frames.json"
+    
+    # Initialize arrays to track frames
+    declare -A frame_map
+    declare -A frame_pages
+    
+    # Extract frames from each page
+    for page_name in "${PAGE_NAMES[@]}"; do
+        echo -e "  Processing page: ${GREEN}$page_name${NC}"
+        
+        # Build jq filter for frame names
+        local frame_filter=""
+        for frame_name in "${FRAME_NAMES[@]}"; do
+            if [ -z "$frame_filter" ]; then
+                frame_filter=".name == \"$frame_name\""
+            else
+                frame_filter="$frame_filter or .name == \"$frame_name\""
+            fi
+        done
+        
+        local page_frames=$(jq -r --arg page "$page_name" "
+            .document.children[] | 
+            select(.name == \$page) | 
+            .children[] |
+            select(.type? == \"FRAME\" and ($frame_filter)) | 
+            {
+                id: .id,
+                name: .name,
+                type: .type,
+                bounds: .absoluteBoundingBox,
+                children: .children,
+                page: \$page
+            }
+        " "$figma_data")
+        
+        if [ -z "$page_frames" ]; then
+            echo -e "    ${YELLOW}Warning: No matching frames found on page '$page_name'${NC}"
+            continue
+        fi
+        
+        # Save page-specific frames
+        local page_slug=$(echo "$page_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        echo "$page_frames" | jq -s '.' > "$OUTPUT_DIR/frames-${page_slug}.json"
+        
+        # Track frame names and which pages they appear on
+        while IFS= read -r frame; do
+            local frame_name=$(echo "$frame" | jq -r '.name')
+            local frame_id=$(echo "$frame" | jq -r '.id')
+            
+            # Track which pages this frame appears on
+            if [ -z "${frame_pages[$frame_name]}" ]; then
+                frame_pages[$frame_name]="$page_name"
+                frame_map[$frame_name]="$frame"
+            else
+                frame_pages[$frame_name]="${frame_pages[$frame_name]},$page_name"
+            fi
+        done < <(echo "$page_frames" | jq -c '.')
+        
+        local count=$(echo "$page_frames" | jq -s 'length')
+        echo -e "    ${GREEN}✓ Found $count frame(s)${NC}"
+    done
+    
+    # Create all frames file with page tracking
+    echo "[" > "$all_frames_file"
+    local first=true
+    for frame_name in "${!frame_map[@]}"; do
+        if [ "$first" = true ]; then
+            first=false
+        else
+            echo "," >> "$all_frames_file"
+        fi
+        
+        local pages="${frame_pages[$frame_name]}"
+        local page_count=$(echo "$pages" | tr ',' '\n' | wc -l)
+        local is_shared=$([ $page_count -gt 1 ] && echo "true" || echo "false")
+        
+        echo "${frame_map[$frame_name]}" | jq --arg pages "$pages" --arg shared "$is_shared" \
+            '. + {pages: ($pages | split(",")), shared: ($shared == "true")}' >> "$all_frames_file"
+    done
+    echo "]" >> "$all_frames_file"
+    
+    # Create shared frames file
+    jq '[.[] | select(.shared == true)]' "$all_frames_file" > "$OUTPUT_DIR/shared-frames.json"
+    
+    local total_count=$(jq 'length' "$all_frames_file")
+    local shared_count=$(jq 'length' "$OUTPUT_DIR/shared-frames.json")
+    
+    echo -e "\n${GREEN}✓ Frame extraction complete:${NC}"
+    echo -e "  Total unique frames: $total_count"
+    echo -e "  Shared frames: $shared_count"
+    echo -e "  Page-specific frames: $((total_count - shared_count))"
+}
+
+# Extract components within frames
+extract_frame_components() {
+    if [ ${#FRAME_NAMES[@]} -eq 0 ]; then
+        return
+    fi
+    
+    echo -e "${YELLOW}Extracting components within frames...${NC}"
+    
+    local all_frames_file="$OUTPUT_DIR/all-frames.json"
+    local frame_components_file="$OUTPUT_DIR/frame-components.json"
+    
+    if [ ! -f "$all_frames_file" ]; then
+        echo -e "  ${YELLOW}No frames file found, skipping frame component extraction${NC}"
+        return
+    fi
+    
+    # Extract all components within frames
+    local frame_count=$(jq 'length' "$all_frames_file")
+    
+    echo "[" > "$frame_components_file"
+    local first=true
+    
+    for i in $(seq 0 $(($frame_count - 1))); do
+        local frame=$(jq -r ".[$i]" "$all_frames_file")
+        local frame_name=$(echo "$frame" | jq -r '.name')
+        local frame_pages=$(echo "$frame" | jq -r '.pages | join(", ")')
+        
+        echo -e "  Scanning frame: ${GREEN}$frame_name${NC}"
+        
+        # Extract components within this frame
+        local components=$(echo "$frame" | jq -c '
+            .. | 
+            select(.type? == "COMPONENT" or .type? == "INSTANCE") | 
+            {
+                id: .id,
+                name: .name,
+                type: .type,
+                bounds: .absoluteBoundingBox,
+                children: .children
+            }
+        ')
+        
+        if [ ! -z "$components" ]; then
+            while IFS= read -r component; do
+                if [ "$first" = true ]; then
+                    first=false
+                else
+                    echo "," >> "$frame_components_file"
+                fi
+                
+                echo "$component" | jq --arg frame "$frame_name" --arg pages "$frame_pages" \
+                    '. + {frame: $frame, frame_pages: ($pages | split(", "))}' >> "$frame_components_file"
+            done < <(echo "$components")
+            
+            local comp_count=$(echo "$components" | wc -l)
+            echo -e "    ${GREEN}✓ Found $comp_count component(s)${NC}"
+        else
+            echo -e "    ${YELLOW}No components found in frame${NC}"
+        fi
+    done
+    
+    echo "]" >> "$frame_components_file"
+    
+    local total_frame_comps=$(jq 'length' "$frame_components_file")
+    echo -e "${GREEN}✓ Found $total_frame_comps total components within frames${NC}"
 }
 
 # Extract components from the specified pages
@@ -249,6 +449,145 @@ extract_components() {
     echo -e "  Total unique components: $total_count"
     echo -e "  Shared components: $shared_count"
     echo -e "  Page-specific components: $((total_count - shared_count))"
+}
+
+# Generate HTML structure for frames
+generate_frame_html_content() {
+    local frame_name="$1"
+    local frame_data="$2"
+    
+    cat << EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$frame_name - Frame</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@$BOOTSTRAP_VERSION/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Custom CSS -->
+    <style>
+        /* Add your custom styles here */
+        .frame-container {
+            padding: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="frame-container">
+        <!-- Frame: $frame_name -->
+        <div class="container-fluid">
+            <div class="row">
+                <div class="col-12">
+                    <!-- TODO: Implement frame structure -->
+                    <!-- Original Figma frame: $frame_name -->
+                    <section class="frame-section">
+                        <h2>$frame_name</h2>
+                        <p>Frame content placeholder - customize based on Figma design</p>
+                        <!-- Components within this frame should be placed here -->
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@$BOOTSTRAP_VERSION/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+EOF
+}
+
+# Generate TPL file content for frames
+generate_frame_tpl_content() {
+    local frame_name="$1"
+    local pages="$2"
+    local is_shared="$3"
+    
+    local shared_note=""
+    if [ "$is_shared" = "true" ]; then
+        shared_note="
+ * SHARED FRAME - Used across multiple pages: $pages
+ * Location: /shared/frames/${frame_name}.tpl"
+    else
+        shared_note="
+ * Page-specific frame: $pages"
+    fi
+    
+    case "$TEMPLATE_ENGINE" in
+        smarty)
+            cat << EOF
+{*
+ * Frame Template: $frame_name
+ * Generated from Figma frame$shared_note
+ *}
+
+<section class="frame-$frame_name">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-12">
+                {* TODO: Implement frame structure *}
+                <div class="frame-content">
+                    <h2>{\$frame_title|default:"$frame_name"}</h2>
+                    <div class="frame-body">
+                        {\$frame_content|default:"Frame content"}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+EOF
+            ;;
+        twig)
+            cat << EOF
+{#
+ # Frame Template: $frame_name
+ # Generated from Figma frame$shared_note
+ #}
+
+<section class="frame-{{ frame_name|default('$frame_name') }}">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-12">
+                {# TODO: Implement frame structure #}
+                <div class="frame-content">
+                    <h2>{{ frame_title|default('$frame_name') }}</h2>
+                    <div class="frame-body">
+                        {{ frame_content|default('Frame content') }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+EOF
+            ;;
+        *)
+            cat << EOF
+<!-- Frame Template: $frame_name -->
+<!-- Generated from Figma frame$shared_note -->
+
+<section class="frame-$frame_name">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-12">
+                <!-- TODO: Implement frame structure -->
+                <div class="frame-content">
+                    <h2>$frame_name</h2>
+                    <div class="frame-body">
+                        Frame content
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+EOF
+            ;;
+    esac
 }
 
 # Generate HTML structure based on component type
@@ -391,6 +730,121 @@ EOF
     esac
 }
 
+# Create HTML and TPL files for frames
+create_frame_files() {
+    if [ ${#FRAME_NAMES[@]} -eq 0 ]; then
+        return
+    fi
+    
+    echo -e "${YELLOW}Creating HTML and TPL files for frames...${NC}"
+    
+    local all_frames_file="$OUTPUT_DIR/all-frames.json"
+    
+    if [ ! -f "$all_frames_file" ]; then
+        echo -e "  ${YELLOW}No frames to process${NC}"
+        return
+    fi
+    
+    local frame_count=$(jq 'length' "$all_frames_file")
+    
+    if [ "$frame_count" -eq 0 ]; then
+        echo -e "  ${RED}No frames to process${NC}"
+        return
+    fi
+    
+    # Create frames subdirectories
+    local html_dir="$OUTPUT_DIR/components"
+    local tpl_dir="$OUTPUT_DIR/tpl"
+    
+    mkdir -p "$html_dir/shared/frames" "$tpl_dir/shared/frames"
+    
+    for page_name in "${PAGE_NAMES[@]}"; do
+        local page_slug=$(echo "$page_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        mkdir -p "$html_dir/$page_slug/frames" "$tpl_dir/$page_slug/frames" "$OUTPUT_DIR/metadata/$page_slug/frames"
+    done
+    
+    mkdir -p "$OUTPUT_DIR/metadata/shared/frames"
+    
+    for i in $(seq 0 $(($frame_count - 1))); do
+        local frame=$(jq -r ".[$i]" "$all_frames_file")
+        local frame_name=$(echo "$frame" | jq -r '.name' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        local frame_id=$(echo "$frame" | jq -r '.id')
+        local is_shared=$(echo "$frame" | jq -r '.shared')
+        local pages=$(echo "$frame" | jq -r '.pages | join(", ")')
+        
+        # Determine output directory
+        local output_subdir=""
+        if [ "$is_shared" = "true" ]; then
+            output_subdir="shared/frames"
+            echo -e "  Creating shared frame: ${GREEN}$frame_name${NC} (used in: $pages)"
+        else
+            # Use the first page as the directory
+            local first_page=$(echo "$frame" | jq -r '.pages[0]')
+            output_subdir="$(echo "$first_page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')/frames"
+            echo -e "  Creating frame: ${GREEN}$frame_name${NC} (page: $first_page)"
+        fi
+        
+        # Generate HTML file
+        generate_frame_html_content "$frame_name" "$frame" > "$html_dir/$output_subdir/${frame_name}.html"
+        
+        # Generate TPL file
+        generate_frame_tpl_content "$frame_name" "$pages" "$is_shared" > "$tpl_dir/$output_subdir/${frame_name}.tpl"
+        
+        # Save frame metadata
+        echo "$frame" | jq '.' > "$OUTPUT_DIR/metadata/$output_subdir/${frame_name}.json"
+    done
+    
+    echo -e "${GREEN}✓ Created $frame_count frame HTML and TPL files${NC}"
+}
+
+# Create HTML and TPL files for components within frames
+create_frame_component_files() {
+    if [ ${#FRAME_NAMES[@]} -eq 0 ]; then
+        return
+    fi
+    
+    local frame_components_file="$OUTPUT_DIR/frame-components.json"
+    
+    if [ ! -f "$frame_components_file" ]; then
+        return
+    fi
+    
+    local comp_count=$(jq 'length' "$frame_components_file")
+    
+    if [ "$comp_count" -eq 0 ]; then
+        return
+    fi
+    
+    echo -e "${YELLOW}Creating HTML and TPL files for components within frames...${NC}"
+    
+    local html_dir="$OUTPUT_DIR/components"
+    local tpl_dir="$OUTPUT_DIR/tpl"
+    
+    # Create frame-components subdirectories
+    mkdir -p "$html_dir/frame-components" "$tpl_dir/frame-components" "$OUTPUT_DIR/metadata/frame-components"
+    
+    for i in $(seq 0 $(($comp_count - 1))); do
+        local component=$(jq -r ".[$i]" "$frame_components_file")
+        local component_name=$(echo "$component" | jq -r '.name' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        local frame_name=$(echo "$component" | jq -r '.frame')
+        local frame_slug=$(echo "$frame_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        local pages=$(echo "$component" | jq -r '.frame_pages | join(", ")')
+        
+        echo -e "  Creating frame component: ${GREEN}$component_name${NC} (in frame: $frame_name)"
+        
+        # Generate HTML file
+        generate_html_content "$component_name" "$component" > "$html_dir/frame-components/${frame_slug}-${component_name}.html"
+        
+        # Generate TPL file
+        generate_tpl_content "$component_name" "$pages" "false" > "$tpl_dir/frame-components/${frame_slug}-${component_name}.tpl"
+        
+        # Save component metadata
+        echo "$component" | jq '.' > "$OUTPUT_DIR/metadata/frame-components/${frame_slug}-${component_name}.json"
+    done
+    
+    echo -e "${GREEN}✓ Created $comp_count frame component files${NC}"
+}
+
 # Create HTML and TPL files for each component
 create_component_files() {
     echo -e "${YELLOW}Creating HTML and TPL files with folder structure...${NC}"
@@ -399,7 +853,7 @@ create_component_files() {
     local shared_components_file="$OUTPUT_DIR/shared-components.json"
     
     # Create directory structure
-    local html_dir="$OUTPUT_DIR/html"
+    local html_dir="$OUTPUT_DIR/components"
     local tpl_dir="$OUTPUT_DIR/tpl"
     
     mkdir -p "$html_dir/shared" "$tpl_dir/shared"
@@ -457,301 +911,268 @@ create_component_files() {
     
     echo -e "${GREEN}✓ Created $component_count HTML and TPL files${NC}"
     
+    # Create frame files
+    create_frame_files
+    create_frame_component_files
+    
     # Create index files for each directory
     create_index_files
 }
 
-# Create index files for easy navigation
-create_index_files() {
-    echo -e "${YELLOW}Creating index files...${NC}"
+# Recursively extract all child elements (components and groups) from a frame
+extract_frame_children() {
+    local element="$1"
     
-    local html_dir="$OUTPUT_DIR/html"
-    local components_file="$OUTPUT_DIR/all-components.json"
+    # Extract current element if it's a component or instance
+    if echo "$element" | jq -e '.type == "COMPONENT" or .type == "INSTANCE"' > /dev/null 2>&1; then
+        echo "$element" | jq '{
+            id: .id,
+            name: .name,
+            type: .type,
+            bounds: .absoluteBoundingBox,
+            children: .children
+        }'
+    fi
     
-    # Create main index.html
-    cat << 'EOF' > "$html_dir/index.html"
+    # Recursively process children
+    if echo "$element" | jq -e '.children' > /dev/null 2>&1; then
+        echo "$element" | jq -c '.children[]' | while IFS= read -r child; do
+            extract_frame_children "$child"
+        done
+    fi
+}
+
+# Generate complete HTML for a frame including all child components
+generate_frame_complete_html() {
+    local frame_name="$1"
+    local frame_data="$2"
+    local page_name="$3"
+    local frame_components_list="$4"
+    
+    cat << EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Figma Components Library</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>$frame_name - Complete Frame</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@$BOOTSTRAP_VERSION/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Custom CSS -->
     <style>
-        .component-card { transition: transform 0.2s; }
-        .component-card:hover { transform: translateY(-5px); }
-        .badge-shared { background-color: #0d6efd; }
-        .badge-page { background-color: #6c757d; }
+        body {
+            background-color: #f8f9fa;
+            padding: 2rem;
+        }
+        
+        .frame-wrapper {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .frame-header {
+            border-bottom: 2px solid #dee2e6;
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .frame-header h1 {
+            margin: 0;
+            color: #212529;
+        }
+        
+        .frame-header .badge {
+            margin-left: 1rem;
+            font-size: 0.85rem;
+        }
+        
+        .frame-meta {
+            font-size: 0.875rem;
+            color: #6c757d;
+            margin-top: 0.5rem;
+        }
+        
+        .frame-content {
+            margin: 2rem 0;
+        }
+        
+        .component-section {
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background: #f8f9fa;
+            border-left: 4px solid #007bff;
+            border-radius: 4px;
+        }
+        
+        .component-section h3 {
+            margin-top: 0;
+            color: #007bff;
+            font-size: 1rem;
+        }
+        
+        .component-section .component-content {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: white;
+            border-radius: 4px;
+        }
+        
+        .frame-bounds-info {
+            font-size: 0.75rem;
+            color: #999;
+            margin-top: 0.5rem;
+        }
     </style>
 </head>
 <body>
-    <div class="container py-5">
-        <h1 class="mb-4">Figma Components Library</h1>
+    <div class="container-fluid">
+        <div class="frame-wrapper">
+            <div class="frame-header">
+                <h1>$frame_name</h1>
+                <div class="frame-meta">
+                    <strong>Source:</strong> Figma Page: <em>$page_name</em>
+                </div>
+            </div>
+            
+            <div class="frame-content">
 EOF
-    
-    echo "        <div class=\"alert alert-info\">" >> "$html_dir/index.html"
-    echo "            <strong>Pages:</strong> ${PAGE_NAMES[*]}" >> "$html_dir/index.html"
-    echo "        </div>" >> "$html_dir/index.html"
-    
-    # Shared components section
-    local shared_count=$(jq 'length' "$OUTPUT_DIR/shared-components.json")
-    if [ "$shared_count" -gt 0 ]; then
-        cat << EOF >> "$html_dir/index.html"
-        
-        <h2 class="mt-5 mb-3">Shared Components <span class="badge badge-shared">$shared_count</span></h2>
-        <div class="row g-3">
-EOF
-        
-        for i in $(seq 0 $(($shared_count - 1))); do
-            local component=$(jq -r ".[$i]" "$OUTPUT_DIR/shared-components.json")
+
+    # Add component sections
+    if [ ! -z "$frame_components_list" ]; then
+        echo "$frame_components_list" | jq -c '.[]' | while IFS= read -r component; do
             local comp_name=$(echo "$component" | jq -r '.name')
-            local comp_slug=$(echo "$comp_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-            local pages=$(echo "$component" | jq -r '.pages | join(", ")')
+            local comp_id=$(echo "$component" | jq -r '.id')
+            local comp_bounds=$(echo "$component" | jq -r '.bounds | "\(.x),\(.y),\(.width)x\(.height)"')
             
-            cat << EOF >> "$html_dir/index.html"
-            <div class="col-md-4">
-                <div class="card component-card h-100">
-                    <div class="card-body">
-                        <h5 class="card-title">$comp_name</h5>
-                        <p class="card-text text-muted small">Used in: $pages</p>
-                        <a href="shared/${comp_slug}.html" class="btn btn-sm btn-primary">View Component</a>
+            cat << COMPONENT
+                <div class="component-section">
+                    <h3>📦 $comp_name</h3>
+                    <div class="component-content">
+                        <!-- Component: $comp_name -->
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">$comp_name</h5>
+                                <p class="card-text">Component placeholder - customize based on Figma design</p>
+                                <small class="text-muted d-block mt-2">
+                                    <strong>Position:</strong> $comp_bounds<br>
+                                    <strong>ID:</strong> $comp_id
+                                </small>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
-EOF
+COMPONENT
         done
-        
-        echo "        </div>" >> "$html_dir/index.html"
     fi
-    
-    # Page-specific sections
-    for page_name in "${PAGE_NAMES[@]}"; do
-        local page_slug=$(echo "$page_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-        local page_file="$OUTPUT_DIR/page-${page_slug}-components.json"
-        local page_only_components=$(jq '[.[] | select(.shared == false)]' "$page_file")
-        local page_count=$(echo "$page_only_components" | jq 'length')
-        
-        if [ "$page_count" -gt 0 ]; then
-            cat << EOF >> "$html_dir/index.html"
-        
-        <h2 class="mt-5 mb-3">$page_name Components <span class="badge badge-page">$page_count</span></h2>
-        <div class="row g-3">
-EOF
-            
-            for i in $(seq 0 $(($page_count - 1))); do
-                local component=$(echo "$page_only_components" | jq -r ".[$i]")
-                local comp_name=$(echo "$component" | jq -r '.name')
-                local comp_slug=$(echo "$comp_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-                
-                cat << EOF >> "$html_dir/index.html"
-            <div class="col-md-4">
-                <div class="card component-card h-100">
-                    <div class="card-body">
-                        <h5 class="card-title">$comp_name</h5>
-                        <p class="card-text text-muted small">Page-specific</p>
-                        <a href="${page_slug}/${comp_slug}.html" class="btn btn-sm btn-primary">View Component</a>
-                    </div>
-                </div>
+
+    cat << EOF
             </div>
-EOF
-            done
             
-            echo "        </div>" >> "$html_dir/index.html"
-        fi
-    done
-    
-    cat << 'EOF' >> "$html_dir/index.html"
+            <div class="frame-bounds-info">
+                <strong>Frame Bounds:</strong> $(echo "$frame_data" | jq -r '.bounds | "\(.x), \(.y) - \(.width)x\(.height)"')
+            </div>
+        </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@$BOOTSTRAP_VERSION/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 EOF
-    
-    echo -e "${GREEN}✓ Created index.html${NC}"
 }
 
-# Create README file
-create_readme() {
-    cat << EOF > "$OUTPUT_DIR/README.md"
-# Figma Components Export
-
-This directory contains HTML and TPL files generated from Figma components across multiple pages.
-
-## Structure
-
-\`\`\`
-.
-├── html/
-│   ├── index.html                    # Main component library index
-│   ├── shared/                       # Components used across multiple pages
-│   │   ├── component-1.html
-│   │   └── component-2.html
-$(for page in "${PAGE_NAMES[@]}"; do
-    page_slug=$(echo "$page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-    echo "│   ├── ${page_slug}/                   # $page page-specific components"
-done)
-│   └── ...
-├── tpl/
-│   ├── shared/                       # Shared template files
-$(for page in "${PAGE_NAMES[@]}"; do
-    page_slug=$(echo "$page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-    echo "│   ├── ${page_slug}/                   # $page templates"
-done)
-│   └── ...
-├── metadata/
-│   ├── shared/                       # Component metadata
-$(for page in "${PAGE_NAMES[@]}"; do
-    page_slug=$(echo "$page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-    echo "│   ├── ${page_slug}/                   # $page metadata"
-done)
-│   └── ...
-├── all-components.json               # All components with page tracking
-├── shared-components.json            # Components used on multiple pages
-$(for page in "${PAGE_NAMES[@]}"; do
-    page_slug=$(echo "$page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-    echo "├── page-${page_slug}-components.json  # $page components"
-done)
-├── figma-data.json                   # Complete Figma file data
-└── README.md
-\`\`\`
-
-## Component Organization
-
-### Shared Components
-Components that appear on **multiple pages** are automatically placed in the \`shared/\` directory.
-These represent your reusable design system components.
-
-**Shared components found:** $(jq 'length' "$OUTPUT_DIR/shared-components.json")
-
-### Page-Specific Components
-Components unique to a single page are organized in page-specific directories.
-
-EOF
-
-    # Add page statistics
-    for page_name in "${PAGE_NAMES[@]}"; do
-        local page_slug=$(echo "$page_name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-        local page_file="$OUTPUT_DIR/page-${page_slug}-components.json"
-        local total=$(jq 'length' "$page_file")
-        local page_only=$(jq '[.[] | select(.shared == false)] | length' "$page_file")
-        
-        cat << EOF >> "$OUTPUT_DIR/README.md"
-**$page_name:**
-- Total components: $total
-- Page-specific: $page_only
-- Shared: $((total - page_only))
-
-EOF
-    done
-
-    cat << EOF >> "$OUTPUT_DIR/README.md"
-
-## Bootstrap Version
-
-Bootstrap $BOOTSTRAP_VERSION
-
-## Viewing Components
-
-### Option 1: Index Page
-Open \`html/index.html\` in your browser to see all components organized by category.
-
-### Option 2: Individual Files
-Navigate to specific component HTML files:
-- Shared: \`html/shared/component-name.html\`
-- Page-specific: \`html/page-name/component-name.html\`
-
-## Using Templates
-
-### Include Shared Components
-\`\`\`$TEMPLATE_ENGINE
-{include file="shared/component-name.tpl"}
-\`\`\`
-
-### Include Page-Specific Components
-\`\`\`$TEMPLATE_ENGINE
-{include file="page-name/component-name.tpl"}
-\`\`\`
-
-## Understanding Component Classification
-
-A component is considered **shared** when it appears with the same name on multiple pages.
-This helps you:
-- Identify reusable design system components
-- Maintain consistency across pages
-- Avoid duplicating code
-
-## Data Files
-
-- \`all-components.json\`: Master list with page tracking
-- \`shared-components.json\`: Filtered list of shared components only
-- \`page-*-components.json\`: Components associated with each page
-- \`figma-data.json\`: Raw Figma API response
-
-## Next Steps
-
-1. Open \`html/index.html\` to browse all components
-2. Review shared components - these are candidates for your component library
-3. Customize Bootstrap structure to match Figma designs
-4. Implement responsive breakpoints
-5. Add design tokens for colors, spacing, and typography
-6. Integrate templates into your application
-
-## Pages Processed
-
-$(for page in "${PAGE_NAMES[@]}"; do echo "- $page"; done)
-
-## Export Configuration
-
-- **Figma File ID:** $FILE_ID
-- **Bootstrap Version:** $BOOTSTRAP_VERSION
-- **Template Engine:** $TEMPLATE_ENGINE
-- **Generated:** $(date)
-
----
-
-Generated by Figma to Bootstrap Components Converter
-EOF
+# Output complete HTML for a specific frame with all components
+output_frame_html() {
+    local target_frame="$1"
+    local output_file="$2"
+    
+    echo -e "${YELLOW}Generating complete HTML for frame: ${GREEN}$target_frame${NC}"
+    
+    # Create frames directory
+    mkdir -p "$OUTPUT_DIR/frames"
+    
+    local all_frames_file="$OUTPUT_DIR/all-frames.json"
+    local frame_components_file="$OUTPUT_DIR/frame-components.json"
+    
+    if [ ! -f "$all_frames_file" ]; then
+        echo -e "${RED}Error: No frames file found. Did you extract frames with -r flag?${NC}"
+        exit 1
+    fi
+    
+    # Find the frame by name
+    local frame_data=$(jq --arg fname "$target_frame" '.[] | select(.name == $fname)' "$all_frames_file")
+    
+    if [ -z "$frame_data" ]; then
+        echo -e "${RED}Error: Frame '$target_frame' not found${NC}"
+        exit 1
+    fi
+    
+    # Get page name from frame
+    local page_name=$(echo "$frame_data" | jq -r '.pages[0]')
+    
+    # Extract components from this frame
+    local frame_components="[]"
+    if [ -f "$frame_components_file" ]; then
+        frame_components=$(jq --arg fname "$target_frame" '[.[] | select(.frame == $fname)]' "$frame_components_file")
+    fi
+    
+    # Generate the complete HTML
+    generate_frame_complete_html "$target_frame" "$frame_data" "$page_name" "$frame_components" > "$output_file"
+    
+    echo -e "${GREEN}✓ Frame HTML output saved to: ${YELLOW}$output_file${NC}"
 }
 
-# Main execution
-main() {
-    echo -e "${GREEN}=== Figma to Bootstrap Components Converter ===${NC}\n"
+# ============================================
+# Main Execution
+# ============================================
+
+# Check dependencies
+check_dependencies
+
+# Parse command line arguments
+parse_args "$@"
+
+# Create output directory
+mkdir -p "$OUTPUT_DIR"
+
+# Fetch Figma file data
+fetch_figma_data
+
+# If output-frame-html mode, extract frames and output HTML
+if [ "$OUTPUT_FRAME_HTML" = true ]; then
+    if [ -z "$FRAME_FOR_HTML" ]; then
+        echo -e "${RED}Error: --frame-name is required with --output-frame-html${NC}"
+        usage
+    fi
     
-    check_dependencies
-    parse_args "$@"
+    # Extract frames if specified
+    extract_frames
     
-    echo -e "Configuration:"
-    echo -e "  Pages: ${YELLOW}${PAGE_NAMES[*]}${NC}"
-    echo -e "  Output: ${YELLOW}$OUTPUT_DIR${NC}"
-    echo -e "  Shared only: ${YELLOW}$SHARED_ONLY${NC}\n"
+    # Extract components within frames
+    extract_frame_components
     
-    # Create output directory structure
-    mkdir -p "$OUTPUT_DIR/html" "$OUTPUT_DIR/tpl" "$OUTPUT_DIR/metadata"
-    
-    # Execute conversion steps
-    fetch_figma_data
+    # Output the frame HTML
+    output_html="$OUTPUT_DIR/frames/${FRAME_FOR_HTML// /-}.html"
+    output_frame_html "$FRAME_FOR_HTML" "$output_html"
+else
+    # Standard extraction mode
+    # Extract components from pages
     extract_components
-    create_component_files
-    create_readme
-    
-    echo -e "\n${GREEN}=== Conversion Complete! ===${NC}"
-    echo -e "Output directory: ${YELLOW}$OUTPUT_DIR${NC}"
-    echo -e "\nFiles created:"
-    echo -e "  - Component library index: $OUTPUT_DIR/html/index.html"
-    echo -e "  - Shared components: $OUTPUT_DIR/html/shared/"
-    for page in "${PAGE_NAMES[@]}"; do
-        page_slug=$(echo "$page" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-        echo -e "  - $page components: $OUTPUT_DIR/html/$page_slug/"
-    done
-    echo -e "  - Templates: $OUTPUT_DIR/tpl/"
-    echo -e "  - Metadata: $OUTPUT_DIR/metadata/"
-    echo -e "  - README: $OUTPUT_DIR/README.md"
-    echo -e "\nNext steps:"
-    echo -e "  1. Open ${YELLOW}$OUTPUT_DIR/html/index.html${NC} in a browser"
-    echo -e "  2. Review the README.md file"
-    echo -e "  3. Customize shared components first (they're used across multiple pages)"
-    echo -e "  4. Implement page-specific components"
-}
 
-# Run main function
-main "$@"
+    # Extract frames if specified
+    extract_frames
+
+    # Extract components within frames
+    extract_frame_components
+
+    # Create component files
+    create_component_files
+
+    echo -e "${GREEN}✓ Export complete!${NC}"
+    echo -e "Output directory: ${YELLOW}$OUTPUT_DIR${NC}"
+fi
