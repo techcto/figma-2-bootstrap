@@ -1,0 +1,13 @@
+{
+  "name": "figma-to-bootstrap",
+  "version": "1.0.0",
+  "description": "Convert Figma frames to pixel-perfect HTML and CSS with Bootstrap",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

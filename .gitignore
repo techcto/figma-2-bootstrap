@@ -1,3 +1,13 @@
-config.sh
-config.sh.dst
-figma-components/
+.env
+.env.local
+node_modules/
+output/
+dist/
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+OLD/
+output/
