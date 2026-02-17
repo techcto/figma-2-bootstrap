@@ -41,18 +41,32 @@ log_warning() {
 
 show_usage() {
     cat << EOF
-Usage: ./figma-to-html.sh -f <FILE_ID> -p <PAGE_NAME> -c <COMPONENT_NAME> [-o <OUTPUT_DIR>]
+Usage: ./figma-to-html.sh -f <FILE_ID> -p <PAGE_NAME> -c <COMPONENT_NAME> [-o <OUTPUT_DIR>] [-l <LIBRARY_FILE_ID>]
 
 Options:
     -f, --file-id       Figma file ID (required)
     -p, --page          Page name in Figma file (required)
     -c, --component     Frame or component name (required)
     -o, --output        Output directory (default: output)
+    -l, --library-file  Figma library file ID to supplement variables (optional)
     -h, --help          Show this help message
 
 Examples:
     ./figma-to-html.sh -f abc123def456 -p "Design" -c "Button"
-    ./figma-to-html.sh --file-id abc123def456 --page "Design" --component "Card" -o ./dist
+    ./figma-to-html.sh -f abc123def456 -p "Design" -c "Card" -l libfile123
+
+Variable Resolution (in order of precedence):
+    1. Manual variables from variables.json file (if present)
+    2. Library file variables (if -l flag provided)
+    3. Main file variables (from Figma Variables API if available)
+    
+    To define manual variables, edit variables.json:
+    {
+      "variables": {
+        "variable-name": "#RRGGBB",
+        "color-background": "#EDF1F8"
+      }
+    }
 
 Requirements:
     - .env file with FIGMA_API_KEY set
@@ -195,6 +209,81 @@ get_frame_data() {
     echo "$temp_file"
 }
 
+extract_variables_from_file() {
+    local file_id="$1"
+    local temp_file=$(mktemp)
+
+    log_info "Fetching variables from file: $file_id"
+
+    # Try the variables endpoint first
+    local http_code
+    http_code=$(curl -s -w "%{http_code}" -o "$temp_file" \
+        -H "X-Figma-Token: ${FIGMA_API_KEY}" \
+        "https://api.figma.com/v1/files/${file_id}/variables/local")
+
+    # Check if variables endpoint is available
+    if [[ "$http_code" == "200" ]]; then
+        log_success "Variables API available"
+        # Parse the variables response
+        jq '
+        reduce .variables[] as $var (
+            {};
+            . as $acc |
+            ($var.id as $id |
+            if $var.resolvedType == "COLOR" then
+                ($var.valuesByMode | to_entries[0].value as $colorId |
+                if $colorId then
+                    (
+                        $acc + {
+                            ($id): (
+                                if $colorId | type == "object" then
+                                    $colorId
+                                else
+                                    {}
+                                end
+                            )
+                        }
+                    )
+                else
+                    $acc
+                end)
+            else
+                $acc
+            end)
+        )
+        ' "$temp_file" 2>/dev/null
+        rm -f "$temp_file"
+        return 0
+    elif [[ "$http_code" == "403" ]]; then
+        log_warning "Variables API requires additional OAuth scope: file_variables:read"
+        log_info "To use Figma variables, update your API credentials at: https://www.figma.com/developers"
+    fi
+
+    # Fallback: extract from file data (will get fill colors but not variable names)
+    log_info "Attempting to extract color information from file data"
+    
+    if ! curl -s \
+        -H "X-Figma-Token: ${FIGMA_API_KEY}" \
+        "https://api.figma.com/v1/files/${file_id}" \
+        -o "$temp_file"; then
+        log_warning "Failed to fetch file for variable extraction"
+        rm -f "$temp_file"
+        echo "{}"
+        return 0
+    fi
+
+    # Try to find variables in the response
+    jq '
+    if .variables then
+        .variables
+    else
+        {}
+    end
+    ' "$temp_file" 2>/dev/null
+
+    rm -f "$temp_file"
+}
+
 ################################################################################
 # Conversion Functions
 ################################################################################
@@ -204,15 +293,24 @@ generate_html_css() {
     local component_name="$2"
     local output_dir="$3"
     local output_file="${4:-index.html}"
+    local variables_json="${5:-}"
 
     log_info "Generating HTML and CSS from Figma data"
 
     # Create output directory
     mkdir -p "$output_dir"
 
+    # Create a temp file with variables if provided
+    local converter_input="$frame_data"
+    if [[ -n "$variables_json" ]]; then
+        converter_input=$(mktemp)
+        jq ". + {variables: $variables_json}" "$frame_data" > "$converter_input"
+        trap "rm -f '$converter_input'" RETURN
+    fi
+
     # Use Node.js script to convert Figma data to HTML/CSS
     node "${SCRIPT_DIR}/lib/converter.js" \
-        --input "$frame_data" \
+        --input "$converter_input" \
         --output "$output_dir" \
         --component "$component_name" \
         --output-file "$output_file"
@@ -307,6 +405,7 @@ main() {
     local page_name=""
     local component_name=""
     local output_dir="$OUTPUT_DIR"
+    local library_file_id=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -325,6 +424,10 @@ main() {
                 ;;
             -o|--output)
                 output_dir="$2"
+                shift 2
+                ;;
+            -l|--library-file)
+                library_file_id="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -361,6 +464,35 @@ main() {
     local file_data=$(get_figma_file "$file_id")
     trap "rm -f '$file_data'" EXIT
 
+    # Extract variables from main file
+    log_info "Extracting variables from main file"
+    local variables_json=$(extract_variables_from_file "$file_id")
+    
+    # Supplement with library file variables if provided
+    if [[ -n "$library_file_id" ]]; then
+        log_info "Supplementing with variables from library file"
+        local library_vars=$(extract_variables_from_file "$library_file_id")
+        if [[ -n "$library_vars" && "$library_vars" != "{}" ]]; then
+            # Merge library variables with main file variables (library takes precedence)
+            variables_json=$(jq -n --argjson main "$variables_json" --argjson lib "$library_vars" '$main + $lib')
+        fi
+    fi
+
+    # Load manual variables from local file if it exists
+    if [[ -f "${SCRIPT_DIR}/variables.json" ]]; then
+        log_info "Loading variables from local variables.json"
+        local manual_vars=$(jq '.variables // {}' "${SCRIPT_DIR}/variables.json" 2>/dev/null)
+        if [[ -n "$manual_vars" && "$manual_vars" != "{}" ]]; then
+            # Merge manual variables (manual takes precedence)
+            variables_json=$(jq -n --argjson current "$variables_json" --argjson manual "$manual_vars" '$current + $manual')
+            log_success "Manual variables loaded and merged"
+        fi
+    fi
+
+    if [[ -n "$variables_json" && "$variables_json" != "{}" ]]; then
+        log_success "Variables extracted and ready for use"
+    fi
+
     # Find page ID
     log_info "Looking for page: $page_name"
     local page_id=$(find_page_by_name "$file_data" "$page_name")
@@ -381,13 +513,22 @@ main() {
     fi
     log_success "Found component: $frame_id"
 
-    # Get frame data for the main frame
-    local frame_data=$(get_frame_data "$file_id" "$frame_id")
+
+    # Extract frame from file data using recursive search
+    # This preserves all fill and styling information
+    log_info "Extracting frame data from full file"
+    local frame_data=$(mktemp)
+    jq "def find_node(\$id):
+      if .id == \$id then .
+      elif .children then (.children[] | find_node(\$id))
+      else empty
+      end;
+    .document | find_node(\"$frame_id\") | {nodes: {\"$frame_id\": .}}" "$file_data" > "$frame_data"
     trap "rm -f '$file_data' '$frame_data'" EXIT
 
     # Get children of the frame
     log_info "Fetching children of frame: $component_name"
-    local children_json=$(jq ".nodes[\"$frame_id\"].document.children // .nodes[\"$frame_id\"].children // []" "$frame_data")
+    local children_json=$(jq ".nodes[\"$frame_id\"].children // []" "$frame_data")
     local children_array=$(echo "$children_json" | jq -c '.[] | {id: .id, name: .name}')
 
     # Create output directory
@@ -395,50 +536,52 @@ main() {
 
     # Generate HTML for the main frame as index.html
     log_info "Generating HTML for main frame: $component_name"
-    generate_html_css "$frame_data" "$component_name" "$output_dir" "index.html"
+    generate_html_css "$frame_data" "$component_name" "$output_dir" "index.html" "$variables_json"
 
     if [[ -z "$children_array" || "$children_array" == "null" ]]; then
         log_warning "No children found in frame: $component_name"
     else
-        # Extract child node IDs
-        local child_ids=$(echo "$children_json" | jq -r '.[].id' | paste -sd ',' -)
-        
-        if [[ -n "$child_ids" ]]; then
-            log_info "Found $(echo "$child_ids" | tr ',' '\n' | wc -l) children, fetching detailed data..."
+        # Sanitize frame name for folder
+        local frame_folder=$(echo "$component_name" | sed 's/ /_/g' | tr '[:upper:]' '[:lower:]')
+
+        # Generate HTML for each child - extract from the full file_data to preserve fills
+        local child_num=1
+        echo "$children_json" | jq -c '.[]' | while read -r child; do
+            local child_id=$(echo "$child" | jq -r '.id')
+            local child_name=$(echo "$child" | jq -r '.name')
+            local file_name=$(echo "$child_name" | sed 's/ /_/g' | tr '[:upper:]' '[:lower:]').html
+            local child_output_dir="${output_dir}/${frame_folder}"
+            mkdir -p "$child_output_dir"
+
+            log_info "[$child_num] Processing child: $child_name"
             
-            # Fetch data for all children
-            local children_detail=$(get_frame_data "$file_id" "$child_ids")
-            trap "rm -f '$file_data' '$frame_data' '$children_detail'" EXIT
-
-            # Sanitize frame name for folder
-            local frame_folder=$(echo "$component_name" | sed 's/ /_/g' | tr '[:upper:]' '[:lower:]')
-
-            # Generate HTML for each child
-            local child_num=1
-            echo "$children_json" | jq -c '.[]' | while read -r child; do
-                local child_id=$(echo "$child" | jq -r '.id')
-                local child_name=$(echo "$child" | jq -r '.name')
-                local file_name=$(echo "$child_name" | sed 's/ /_/g' | tr '[:upper:]' '[:lower:]').html
-                local child_output_dir="${output_dir}/${frame_folder}"
-                mkdir -p "$child_output_dir"
-
-                log_info "[$child_num] Processing child: $child_name"
-                
-                # Create a temp file with just this child's data
-                local child_only=$(mktemp)
-                jq "{nodes: {\"$child_id\": .nodes[\"$child_id\"]}}" "$children_detail" > "$child_only"
-                
-                # Generate HTML for this child
-                node "${SCRIPT_DIR}/lib/converter.js" \
-                    --input "$child_only" \
-                    --output "$child_output_dir" \
-                    --component "$child_name" \
-                    --output-file "$file_name" 2>/dev/null
-
+            # Extract this child from the full file data
+            local child_only=$(mktemp)
+            jq "def find_node(\$id):
+              if .id == \$id then .
+              elif .children then (.children[] | find_node(\$id))
+              else empty
+              end;
+            .document | find_node(\"$child_id\") | {nodes: {\"$child_id\": .}}" "$file_data" > "$child_only"
+            
+            # Add variables if available
+            if [[ -n "$variables_json" ]]; then
+                child_only_with_vars=$(mktemp)
+                jq ". + {variables: $variables_json}" "$child_only" > "$child_only_with_vars"
                 rm -f "$child_only"
-                ((child_num++))
-            done
-        fi
+                child_only="$child_only_with_vars"
+            fi
+            
+            # Generate HTML for this child
+            node "${SCRIPT_DIR}/lib/converter.js" \
+                --input "$child_only" \
+                --output "$child_output_dir" \
+                --component "$child_name" \
+                --output-file "$file_name"
+
+            rm -f "$child_only"
+            ((child_num++))
+        done
     fi
 
     echo ""
