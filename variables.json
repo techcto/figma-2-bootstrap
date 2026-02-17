@@ -1,7 +1,0 @@
-{
-  "comment": "Manual variable color mappings. Maps Figma variable IDs to their color values.",
-  "variables": {
-    "VariableID:3:5": "#EDF1F8",
-    "lynx-light-blue": "#EDF1F8"
-  }
-}

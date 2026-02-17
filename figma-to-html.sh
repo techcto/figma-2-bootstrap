@@ -587,8 +587,11 @@ main() {
     echo ""
     log_success "Conversion complete!"
     log_info "Output files created in: $output_dir"
-    log_info "  - index.html"
-    log_info "  - styles.css"
+    log_info "  - index.html (main frame)"
+    log_info "  - components.json (component metadata)"
+    if [[ -d "$output_dir/${frame_folder}" ]]; then
+        log_info "  - ${frame_folder}/ (child component HTML files)"
+    fi
 }
 
 # Run main function if script is executed directly
