@@ -1,13 +1,15 @@
-# Figma to Bootstrap HTML/CSS Converter
+# Figma to Bootstrap HTML Converter
 
-Convert Figma frames and components to pixel-perfect, semantic HTML and CSS using Bootstrap 5.3 utilities and responsive classes.
+Convert Figma frames and components to semantic HTML using Bootstrap 5.3 utilities and responsive classes. No custom CSS—pure Bootstrap.
 
 ## Features
 
 - 🎨 Convert Figma frames and components to HTML
 - 📱 Responsive design with Bootstrap 5.3
 - ♿ Semantic HTML output
-- 🎯 Pixel-perfect styling
+- 🚫 Zero custom CSS—Bootstrap utilities only
+- 🎨 Automatic color mapping to Bootstrap theme colors
+- 📐 Flexbox layouts with Bootstrap utility classes
 - 🔐 Secure API key management via config file
 - 🚀 Simple command-line interface
 
@@ -102,19 +104,20 @@ chmod +x figma-to-html.sh
 
 ## Output
 
-The script generates two files in the output directory:
+The script generates semantic HTML files in the output directory:
 
 ### `index.html`
-- Semantic HTML structure
-- Bootstrap 5.3 CDN links
+- Semantic HTML structure with Bootstrap utility classes
+- Bootstrap 5.3 CSS CDN link
 - Responsive meta tags
-- Links to the generated CSS file
+- No custom CSS—all styling via Bootstrap utilities
 
-### `styles.css`
-- Custom styles extracted from Figma
-- Bootstrap utility classes
-- Component-specific styling
-- Comments indicating source
+### Child Components
+- Separate HTML files for each child frame/component
+- All using Bootstrap utilities for styling
+
+### `components.json`
+- Metadata about discovered components in the frame
 
 ## Example Output
 
@@ -126,29 +129,22 @@ The script generates two files in the output directory:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Button</title>
+    
+    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="styles.css" rel="stylesheet">
 </head>
 <body>
     <div class="container-fluid p-4">
-        <button class="btn btn-primary btn-1">Click Me</button>
+        <button class="btn btn-primary px-4 py-2">Click Me</button>
     </div>
+
+    <!-- Bootstrap JS Bundle -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 ```
 
-**styles.css:**
-```css
-/* Generated from Figma */
-/* Bootstrap version: 5.3.0 */
-
-.btn-1 {
-  background-color: rgb(25, 118, 210);
-  border-radius: 4px;
-  padding: 8px 16px;
-}
-```
+**Note:** All styling is done via Bootstrap utility classes (`btn`, `btn-primary`, `px-4`, `py-2`, etc.). No custom CSS file is generated.
 
 ## Troubleshooting
 
@@ -199,14 +195,14 @@ FIGMA_FILE_ID=your_figma_file_id_here
 2. **File Fetch**: Retrieves the Figma file structure
 3. **Page/Component Lookup**: Finds the specified page and component
 4. **Data Extraction**: Fetches detailed node data from Figma
-5. **Conversion**: Converts Figma properties to HTML and CSS:
-   - **Layout**: Figma's auto-layout becomes flexbox
-   - **Colors**: RGB values converted to CSS colors
-   - **Typography**: Font properties preserved
-   - **Spacing**: Converted to Bootstrap scales
-   - **Shadows**: Drop shadows converted to CSS box-shadow
-   - **Borders**: Stroke data converted to CSS borders
-6. **Output**: Generates semantic HTML with Bootstrap integration
+5. **Conversion**: Converts Figma properties to Bootstrap utility classes:
+   - **Layout**: Figma's auto-layout becomes flexbox (`d-flex`, `flex-row`, `flex-column`)
+   - **Colors**: RGB values mapped to Bootstrap theme colors (`bg-primary`, `text-danger`, etc.)
+   - **Typography**: Font sizes to Bootstrap scales (`fs-1` through `fs-6`), weights (`fw-bold`, `fw-normal`)
+   - **Spacing**: Padding mapped to Bootstrap scale (`p-4`, `px-3`, `py-2`, `gap-2`, etc.)
+   - **Shadows**: Drop shadows become `shadow` utility class
+   - **Borders**: Strokes become `border` and rounded corners map to `rounded-1`, `rounded-2`, `rounded-3`
+6. **Output**: Generates semantic HTML with Bootstrap utility classes only (zero custom CSS)
 
 ## Bootstrap Integration
 
@@ -224,16 +220,18 @@ The generated HTML uses Bootstrap 5.3 for:
 - Complex interactions and animations are not converted
 - Custom Figma plugins and advanced effects may not translate
 - Prototype links and interactions are not preserved
-- Some advanced CSS features may require manual adjustment
+- Color mapping is approximate (RGB values mapped to closest Bootstrap theme color)
+- Non-standard spacing/sizing requires manual Bootstrap utility adjustment
 - Very complex nested components may need refinement
 
 ## Tips for Best Results
 
 1. **Use Bootstrap Components**: Build your Figma components using Bootstrap design patterns
 2. **Consistent Naming**: Use clear, consistent names for pages, frames, and components
-3. **Test Responsiveness**: The generated HTML may need responsive adjustments
-4. **Validate HTML**: Always validate the generated HTML for accessibility
-5. **Custom CSS**: Add custom CSS as needed for pixel-perfect results
+3. **Bootstrap-Friendly Design**: Use colors and spacing that map well to Bootstrap's default palette
+4. **Test Responsiveness**: The generated HTML is responsive by default via Bootstrap
+5. **Validate HTML**: Always validate the generated HTML for accessibility
+6. **Color Palette**: The converter maps Figma colors to Bootstrap theme colors (primary, secondary, success, danger, warning, info, light, dark, white, black)
 
 ## API Rate Limiting
 
